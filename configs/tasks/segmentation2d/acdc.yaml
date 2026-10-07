@@ -1,0 +1,132 @@
+experiment_name: acdc_segmentation2d
+output_dir: outputs/experiments/acdc
+teacher_output_dir: outputs/experiments/acdc/teacher/native
+comparison_teacher_output_dir: outputs/experiments/acdc/teacher/matched_test
+seed: 0
+device: auto
+task_type: segmentation2d
+model: {task_type: segmentation2d, num_classes: 2, in_channels: 1}
+dataset:
+  type: segmentation2d
+  name: acdc
+  root: "${RACMED_DATA_ROOT}/acdc"
+  image_size: [256, 256]
+  in_channels: 1
+  num_classes: 2
+  target_mode: regions
+  region_class_ids: [1, 3]
+  split_counts: [70, 15, 15]
+  split_policy: official_holdout
+  box_perturb: 0
+  train_box_perturb: 10
+teacher:
+  source: medsam
+  backend: official_sam
+  name: medsam-vit-base
+  model_dir: "${RACMED_MODEL_ROOT}/medsam-vit-base"
+  require_local_weights: true
+  pretrained: true
+  num_classes: 2
+  in_channels: 1
+  independent_regions: true
+  sam_input_size: 1024
+  checkpoint_file: "${RACMED_MODEL_ROOT}/medsam-vit-base/medsam_vit_b.pth"
+compressed_model:
+  source: custom
+  name: compact_unet2d
+  pretrained: false
+  channels: [16, 32, 64, 128]
+  prompt_aware: true
+  prompt_channels: 2
+training:
+  epochs: 50
+  batch_size: 8
+  num_workers: 2
+  optimizer: adamw
+  lr: 0.0005
+  weight_decay: 0.00001
+  scheduler: cosine
+  amp: true
+  amp_init_scale: 256
+  gradient_accumulation_steps: 1
+  gradient_clip_norm: 5.0
+  early_stopping_patience: 12
+  cache_teacher_outputs: true
+  teacher_cache_dir: outputs/cache/teacher/acdc_medsam_256
+  cache_static_risk: true
+  save_best_by: val_reliability_score
+  reliability_weights: {dice: 0.7, boundary_f1: 0.1, precision: 0.1, small_component_recall: 0.05, false_negative_lesion_rate: 0.05}
+loss: {temperature: 3.0, lambda_global: 0.05, baseline_kd_weight: 0.3, lambda_local: 0.005, local_feature_mode: attention, lambda_boundary: 0.02, lambda_relation: 0.0, lambda_calib: 0.02, lambda_sparse: 0.0, focal_gamma: 1.0, risk_supervision_strength: 0.5, risk_supervision_foreground_only: true}
+risk: {alpha_boundary: 2.0, alpha_small: 2.0, alpha_entropy: 1.0, alpha_disagreement: 1.0, alpha_class: 1.0, small_component_threshold: 64}
+compression:
+  max_prune_ratio: 0.50
+  target_global_sparsity: 0.20
+  allocation_mode: risk_adjusted_magnitude
+  risk_protection_strength: 2.0
+  profile_perturbation_mode: channel_ablation
+  profile_channel_ablation_ratio: 0.10
+  protected_layer_patterns: [head, classifier, ".out."]
+  use_risk_map: true
+  high_threshold: 0.7
+  pruning_method: elastic
+  # Prompt-conditioned skip dependencies are not safely rewritten by the
+  # generic structural backend. Preserve the risk-derived layer allocation as
+  # persistent weight masks and report effective (not physical) sparsity.
+  structural_backend: false
+  quantization: risk_aware_mixed
+deployment:
+  model_role: compressed_model
+  reliability_provider: auto
+  reliability_surface_metrics: false
+  input_size: [256, 256]
+  dynamic_axes: true
+  warmup: 10
+  repetitions: 100
+teacher_evaluation:
+  dataset_split_policy: all_labeled
+  dataset_image_size: [256, 256]
+  reported_metrics: {rv_dice: 0.954, lv_dice: 0.966}
+  gates:
+    - {metric: class_wise_median.0.dice, minimum: 0.92}
+    - {metric: class_wise_median.1.dice, minimum: 0.92}
+reporting: {save_per_case: true, bootstrap_ci: true, statistical_tests: true}
+pipeline:
+  evaluate_teacher: true
+  methods: [standalone, vanilla_kd, attention_kd, relation_kd, racmed]
+  seeds: [0, 1, 2]
+  training_variants:
+    - name: ablation_no_target_risk
+      method: racmed
+      seeds: [0, 1, 2]
+      overrides:
+        risk: {alpha_boundary: 0.0, alpha_small: 0.0}
+    - name: ablation_no_predictive_risk
+      method: racmed
+      seeds: [0, 1, 2]
+      overrides:
+        risk: {alpha_entropy: 0.0, alpha_disagreement: 0.0}
+    - name: ablation_no_risk_gating
+      method: racmed
+      seeds: [0, 1, 2]
+      overrides:
+        loss: {risk_gating_enabled: false}
+  compression_variants:
+    - name: racmed_mask_elastic_20
+      method: racmed
+      seeds: [0, 1, 2]
+      export: true
+      export_seeds: [0, 1, 2]
+      evaluate_onnx: true
+      tensorrt_qdq: true
+      benchmark: true
+      benchmark_seeds: [0]
+      overrides:
+        deployment: {reliability_artifacts: [onnx_fp32, onnx_uniform_qdq_int8, onnx_risk_aware_qdq_int8]}
+    - name: uniform_magnitude_mask_20
+      method: racmed
+      seeds: [0, 1, 2]
+      export: false
+      benchmark: true
+      benchmark_seeds: [0]
+      overrides:
+        compression: {pruning_method: magnitude, structural_backend: false, target_global_sparsity: 0.20, max_prune_ratio: 0.20, use_risk_map: false}

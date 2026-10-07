@@ -1,0 +1,144 @@
+experiment_name: brats2018_segmentation3d
+output_dir: outputs/experiments/brats2018
+teacher_output_dir: outputs/experiments/brats2018/teacher/native
+comparison_teacher_output_dir: outputs/experiments/brats2018/teacher/matched_test
+seed: 0
+device: auto
+task_type: segmentation3d
+model: {task_type: segmentation3d, num_classes: 3, in_channels: 4}
+dataset:
+  type: segmentation3d
+  name: brats2018
+  root: "${RACMED_DATA_ROOT}/brats2018"
+  dataset_version: "2018"
+  target_mode: regions
+  image_size: null
+  crop_size: [128, 128, 96]
+  crop_training: true
+  split_counts: [200, 42, 43]
+  split_seed: 123
+  in_channels: 4
+  num_classes: 3
+teacher:
+  source: monai_bundle
+  name: brats_segresnet
+  model_dir: "${RACMED_MODEL_ROOT}/brats_mri_segmentation"
+  require_local_weights: true
+  pretrained: true
+  num_classes: 3
+  in_channels: 4
+compressed_model:
+  source: custom
+  name: compact_unet3d
+  pretrained: false
+  channels: [16, 32, 64, 128]
+training:
+  epochs: 40
+  batch_size: 1
+  num_workers: 2
+  optimizer: adamw
+  lr: 0.0003
+  weight_decay: 0.00001
+  scheduler: cosine
+  amp: true
+  amp_init_scale: 256
+  gradient_accumulation_steps: 2
+  gradient_clip_norm: 5.0
+  max_train_batches: 100
+  max_val_batches: 8
+  validation_interval: 4
+  early_stopping_patience: 5
+  save_best_by: val_reliability_score
+  reliability_weights: {dice: 0.65, boundary_f1: 0.1, precision: 0.05, small_component_recall: 0.1, false_negative_lesion_rate: 0.1}
+method_overrides:
+  racmed:
+    training:
+      model_selection_primary_metric: dice
+      model_selection_max_primary_drop: 0.02
+loss: {temperature: 3.0, lambda_global: 0.10, baseline_kd_weight: 0.25, lambda_local: 0.01, local_feature_mode: attention, local_logit_weight: 0.25, lambda_boundary: 0.02, lambda_relation: 0.01, lambda_calib: 0.02, lambda_sparse: 0.0, focal_gamma: 1.0, risk_supervision_strength: 0.25, risk_supervision_foreground_only: true, dice_include_background: true, dice_squared: true, dice_batch: true}
+risk: {alpha_boundary: 2.0, alpha_small: 1.5, alpha_entropy: 1.0, alpha_disagreement: 1.0, alpha_class: 1.0, small_component_threshold: 128}
+compression:
+  profile_crop_size: [128, 128, 96]
+  max_prune_ratio: 0.20
+  target_global_sparsity: 0.20
+  high_threshold: 0.30
+  use_risk_map: true
+  pruning_method: magnitude
+deployment:
+  model_role: compressed_model
+  reliability_provider: auto
+  reliability_surface_metrics: false
+  input_size: [128, 128, 96]
+  # 3D CPU ONNX inference takes ~36 s per fixed crop on the reference
+  # workstation. Two warm-ups remove cold-start effects; five measured runs
+  # retain a useful latency distribution without low-information repetition.
+  warmup: 2
+  repetitions: 5
+evaluation:
+  sliding_window: {roi_size: [240, 240, 160], sw_batch_size: 1, overlap: 0.5}
+  segmentation_threshold_calibration: true
+  segmentation_threshold_objective: reliability
+  segmentation_threshold_max_dice_drop: 0.01
+  threshold_candidates: [0.20, 0.30, 0.40, 0.50, 0.60]
+  segmentation_threshold_weights: {dice: 0.55, boundary_f1: 0.05, precision: 0.05, small_component_recall: 0.175, false_negative_lesion_rate: 0.175}
+  lesion_threshold_candidates: [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 0.99, 1.0]
+  froc_workers: 4
+  lesion_component_min_iou: 0.10
+  froc_max_fp_per_case: 8.0
+  froc_auc_fp_limits: [4.0, 8.0]
+  froc_fp_targets: [0.5, 1.0, 2.0, 4.0, 8.0]
+teacher_evaluation:
+  split: val
+  reported_metrics: {dice: 0.8518}
+  gates:
+    - {metric: dice, minimum: 0.82}
+reporting: {save_per_case: true, bootstrap_ci: true, statistical_tests: true}
+pipeline:
+  evaluate_teacher: true
+  methods: [standalone, vanilla_kd, attention_kd, relation_kd, racmed]
+  seeds: [0, 1, 2]
+  training_variants:
+    - name: racmed_object_aware
+      method: racmed
+      seeds: [0, 1, 2]
+      overrides:
+        dataset: {crop_positive_probability: 0.9, crop_region_weights: [1.0, 1.0, 4.0]}
+        method_overrides:
+          racmed:
+            initialize_from: vanilla_kd
+            training: {epochs: 20, lr: 0.00005, validation_interval: 2, early_stopping_patience: 5, model_selection_primary_metric: dice, model_selection_max_primary_drop: 0.02}
+        loss: {component_supervision_strength: 0.5, risk_supervision_strength: 0.5}
+    - name: ablation_no_target_risk
+      method: racmed
+      seeds: [0, 1, 2]
+      overrides:
+        risk: {alpha_boundary: 0.0, alpha_small: 0.0}
+    - name: ablation_no_predictive_risk
+      method: racmed
+      seeds: [0, 1, 2]
+      overrides:
+        risk: {alpha_entropy: 0.0, alpha_disagreement: 0.0}
+    - name: ablation_no_risk_gating
+      method: racmed
+      seeds: [0, 1, 2]
+      overrides:
+        loss: {risk_gating_enabled: false}
+  compression_variants:
+    - name: racmed_elastic_pruned
+      method: racmed
+      seeds: [0, 1, 2]
+      export: true
+      export_seeds: [0, 1, 2]
+      evaluate_onnx: true
+      tensorrt_qdq: true
+      benchmark: true
+      benchmark_seeds: [0]
+      overrides:
+        compression: {pruning_method: elastic, structural_backend: false, target_global_sparsity: 0.20, max_prune_ratio: 0.20, use_risk_map: true}
+        deployment: {reliability_artifacts: [onnx_fp32, onnx_uniform_qdq_int8, onnx_risk_aware_qdq_int8]}
+    - name: uniform_magnitude_20_crosstask
+      method: racmed
+      seeds: [0, 1, 2]
+      export: false
+      benchmark: true
+      benchmark_seeds: [0]

@@ -1,0 +1,9 @@
+# Install JetPack-matched PyTorch and ONNX Runtime GPU builds first.
+# Native INT8 additionally requires JetPack's trtexec and Python bindings
+# (tensorrt, tensorrt-dev, and python3-libnvinfer system packages).
+# This file deliberately does not replace any hardware runtime package.
+numpy>=1.26,<2
+pandas>=2.1
+pyyaml>=6.0
+tqdm>=4.66
+onnx>=1.16
